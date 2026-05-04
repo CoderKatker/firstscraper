@@ -45,6 +45,17 @@ def init_db():
     )
     """)
 
+    # Remove duplicates, keep newest row
+    cur.execute("""
+    DELETE FROM posts
+    WHERE id NOT IN (
+        SELECT MAX(id)
+        FROM posts
+        GROUP BY source, link
+    )
+    """)
+
+    # Create unique index after cleanup
     cur.execute("""
     CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_post
     ON posts(source, link)
