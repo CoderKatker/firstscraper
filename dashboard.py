@@ -1,170 +1,70 @@
-import math
 import streamlit as st
 import sqlite3
 import pandas as pd
-import requests
 import time
-from bs4 import BeautifulSoup
-from streamlit_autorefresh import st_autorefresh
-from collections import Counter
 import re
+from collections import Counter
+from streamlit_autorefresh import st_autorefresh
 
 DB = "data.db"
-SCRAPE_INTERVAL_SECONDS = 600   # 10 minutes
-AUTO_REFRESH_MS = 30000        # page refresh every 30 seconds
 
 # --------------------------
 # Auto refresh
 # --------------------------
-st_autorefresh(interval=AUTO_REFRESH_MS, limit=None, key="refresh")
+st_autorefresh(interval=30000, limit=None, key="refresh")
 
 # --------------------------
-# DB setup
+# DB load
 # --------------------------
 def get_conn():
     return sqlite3.connect(DB, check_same_thread=False)
 
-def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS posts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        source TEXT,
-        title TEXT,
-        link TEXT,
-        meta TEXT,
-        scraped_at REAL
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS app_state (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    )
-    """)
-
-    # Remove duplicates, keep newest row
-    cur.execute("""
-    DELETE FROM posts
-    WHERE id NOT IN (
-        SELECT MAX(id)
-        FROM posts
-        GROUP BY source, link
-    )
-    """)
-
-    # Create unique index after cleanup
-    cur.execute("""
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_post
-    ON posts(source, link)
-    """)
-
-    conn.commit()
-    conn.close()
-
-# --------------------------
-# State helpers
-# --------------------------
-def get_state(key, default=None):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT value FROM app_state WHERE key=?", (key,))
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else default
-
-def set_state(key, value):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO app_state(key, value)
-        VALUES(?, ?)
-        ON CONFLICT(key) DO UPDATE SET value=excluded.value
-    """, (key, str(value)))
-    conn.commit()
-    conn.close()
-
-# --------------------------
-# Scraper
-# --------------------------
-def scrape_hn():
-    url = "https://news.ycombinator.com/"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    try:
-        html = requests.get(url, headers=headers, timeout=10).text
-    except Exception:
-        return 0
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    titles = soup.select(".titleline")
-    subtexts = soup.select(".subtext")
-
-    conn = get_conn()
-    cur = conn.cursor()
-
-    inserted = 0
-
-    for i in range(min(len(titles), len(subtexts))):
-        title = titles[i].get_text(strip=True)
-        link = titles[i].find("a")["href"] if titles[i].find("a") else ""
-        meta = subtexts[i].get_text(" ", strip=True)
-
-        try:
-            cur.execute("""
-                INSERT INTO posts (source, title, link, meta, scraped_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, ("hackernews", title, link, meta, time.time()))
-            inserted += 1
-        except sqlite3.IntegrityError:
-            pass
-
-    conn.commit()
-    conn.close()
-
-    return inserted
-
-# --------------------------
-# Controlled scrape
-# --------------------------
-def maybe_scrape():
-    last = float(get_state("last_scrape", "0"))
-    now = time.time()
-
-    if now - last >= SCRAPE_INTERVAL_SECONDS:
-        count = scrape_hn()
-        set_state("last_scrape", now)
-        return count
-    return 0
-
-# --------------------------
-# Data loading
-# --------------------------
-@st.cache_data(ttl=60)
 def load_data():
     conn = get_conn()
+
     df = pd.read_sql_query("""
         SELECT * FROM posts
         ORDER BY scraped_at DESC, id DESC
-        LIMIT 300
+        LIMIT 500
     """, conn)
+
     conn.close()
     return df
 
 # --------------------------
-# Keyword trends
+# Scoring system (multi-source aware)
 # --------------------------
+def score(text, source):
+    text = text.lower()
+    score = 0
 
+    keywords = [
+        "ai", "llm", "gpt", "model", "agent",
+        "security", "hack", "vulnerability",
+        "startup", "funding", "launch",
+        "paper", "research", "release"
+    ]
+
+    for k in keywords:
+        if k in text:
+            score += 2
+
+    # source weighting (signal quality bias)
+    if source in ["hackernews", "github", "arxiv"]:
+        score += 1
+
+    return score
+
+# --------------------------
+# Emerging topic detection
+# --------------------------
 def extract_phrases(text):
     words = re.findall(r"[a-zA-Z]{3,}", text.lower())
 
     stop = {
         "the","and","for","with","from","that","this","are","was",
-        "have","has","not","you","your","new","how","why","what"
+        "have","has","not","you","your","new","how","why","what",
+        "com","org","net","github","browser","text"
     }
 
     words = [w for w in words if w not in stop]
@@ -183,100 +83,135 @@ def extract_phrases(text):
 
 
 def detect_emerging_topics(df):
-    if len(df) < 20:
+    if len(df) < 30:
         return []
 
     df = df.sort_values("scraped_at", ascending=False)
 
-    recent = df.head(50)
-    older = df.iloc[50:250]
+    recent = df.head(80)
+    older = df.iloc[80:300]
 
     recent_counts = Counter()
     older_counts = Counter()
 
-    for title in recent["title"]:
-        recent_counts.update(extract_phrases(title))
+    for t in recent["title"]:
+        recent_counts.update(extract_phrases(t))
 
-    for title in older["title"]:
-        older_counts.update(extract_phrases(title))
+    for t in older["title"]:
+        older_counts.update(extract_phrases(t))
 
     scored = []
 
-    for phrase, recent_count in recent_counts.items():
-        old_count = older_counts.get(phrase, 0)
+    for phrase, rcount in recent_counts.items():
+        ocount = older_counts.get(phrase, 0)
 
-        # velocity score
-        score = recent_count / (1 + old_count)
+        if rcount < 2:
+            continue
 
-        # require multiple recent mentions
-        if recent_count >= 2:
-            scored.append((phrase, round(score, 2), recent_count, old_count))
+        velocity = rcount / (1 + ocount)
+
+        scored.append((phrase, round(velocity, 2), rcount, ocount))
 
     scored.sort(key=lambda x: x[1], reverse=True)
 
     return scored[:15]
-# --------------------------
-# Startup
-# --------------------------
-init_db()
-new_rows = maybe_scrape()
-df = load_data()
 
 # --------------------------
 # UI
 # --------------------------
-st.title("Hacker News Signal Dashboard")
+st.title("Multi-Source Signal Intelligence Dashboard")
 
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.metric("Rows Loaded", len(df))
-
-with col2:
-    st.metric("New Rows Added", new_rows)
-
-with col3:
-    last_scrape = float(get_state("last_scrape", "0"))
-    mins = int((time.time() - last_scrape) / 60)
-    st.metric("Last Scrape", f"{mins} min ago")
+df = load_data()
 
 if df.empty:
-    st.warning("No data available.")
+    st.warning("No data available. Run ingest.py first.")
     st.stop()
 
 df["scraped_at"] = pd.to_datetime(df["scraped_at"], unit="s")
 
 # --------------------------
-# Search
+# Apply scoring
 # --------------------------
-query = st.text_input("Search titles")
-
-if query:
-    df = df[df["title"].str.contains(query, case=False, na=False)]
+df["score"] = df.apply(lambda r: score(r["title"], r["source"]), axis=1)
 
 # --------------------------
-# Trending keywords
+# Sidebar filters
 # --------------------------
+st.sidebar.title("Filters")
 
-st.subheader("Emerging Topics (Velocity-Based)")
+sources = sorted(df["source"].unique().tolist())
 
-top_words = detect_emerging_topics(df)
+selected_sources = st.sidebar.multiselect(
+    "Sources",
+    sources,
+    default=sources
+)
 
-if top_words:
-    trend_df = pd.DataFrame(
-        top_words,
-        columns=["Phrase", "Velocity Score", "Recent Count", "Baseline Count"]
+min_score = st.sidebar.slider("Min Score", 0, 10, 0)
+
+search = st.sidebar.text_input("Search")
+
+df = df[df["source"].isin(selected_sources)]
+df = df[df["score"] >= min_score]
+
+if search:
+    df = df[df["title"].str.contains(search, case=False, na=False)]
+
+# --------------------------
+# Metrics
+# --------------------------
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.metric("Total Items", len(df))
+
+with col2:
+    st.metric("Sources Active", df["source"].nunique())
+
+with col3:
+    st.metric("Avg Score", round(df["score"].mean(), 2))
+
+# --------------------------
+# Source distribution
+# --------------------------
+st.subheader("Source Distribution")
+
+st.bar_chart(df["source"].value_counts())
+
+# --------------------------
+# Emerging topics
+# --------------------------
+st.subheader("Emerging Topics (Velocity Detection)")
+
+topics = detect_emerging_topics(df)
+
+if topics:
+    topic_df = pd.DataFrame(
+        topics,
+        columns=["Phrase", "Velocity", "Recent Count", "Baseline Count"]
     )
-    st.dataframe(trend_df, width="stretch")
+    st.dataframe(topic_df, width="stretch")
 else:
-    st.info("Not enough data yet to compute trends.")
+    st.info("Not enough data yet for trend detection.")
 
 # --------------------------
-# Feed
+# Main feed
 # --------------------------
-st.subheader("Latest Feed")
+st.subheader("Unified Signal Feed")
+
+df = df.sort_values(["score", "scraped_at"], ascending=[False, False])
 
 st.dataframe(
-    df[["title", "link", "scraped_at"]],
+    df[["source", "score", "title", "link", "scraped_at"]],
     width="stretch"
 )
+
+# --------------------------
+# Cluster placeholder (if you added embeddings later)
+# --------------------------
+if "cluster" in df.columns:
+    st.subheader("Clusters")
+
+    for c in sorted(df["cluster"].unique()):
+        st.markdown(f"### Cluster {c}")
+        st.write(df[df["cluster"] == c][["source", "title", "score"]].head(5))
