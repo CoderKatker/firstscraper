@@ -257,12 +257,19 @@ if query:
 # --------------------------
 # Trending keywords
 # --------------------------
-st.subheader("Trending Keywords")
 
-top_words = trending_words(df["title"].tolist())
+st.subheader("Emerging Topics (Velocity-Based)")
 
-trend_df = pd.DataFrame(top_words, columns=["Keyword", "Count"])
-st.dataframe(trend_df, width="stretch")
+top_words = detect_emerging_topics(df)
+
+if top_words:
+    trend_df = pd.DataFrame(
+        top_words,
+        columns=["Phrase", "Velocity Score", "Recent Count", "Baseline Count"]
+    )
+    st.dataframe(trend_df, width="stretch")
+else:
+    st.info("Not enough data yet to compute trends.")
 
 # --------------------------
 # Feed
