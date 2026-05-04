@@ -157,21 +157,23 @@ def load_data():
 # --------------------------
 # Keyword trends
 # --------------------------
+
 def trending_words(titles):
-    stop = {
-        "the","a","an","to","for","of","and","in","on","is","with",
-        "how","why","what","from","at","by","new","show","using"
-    }
+    signal_terms = [
+        "ai","gpt","llm","startup","funding",
+        "hack","security","python","rust",
+        "openai","google","meta"
+    ]
 
-    words = []
+    counts = Counter()
 
-    for t in titles:
-        tokens = re.findall(r"[A-Za-z]{3,}", t.lower())
-        for token in tokens:
-            if token not in stop:
-                words.append(token)
+    for title in titles:
+        lower = title.lower()
+        for term in signal_terms:
+            if term in lower:
+                counts[term] += 1
 
-    return Counter(words).most_common(10)
+    return counts.most_common(10)
 
 # --------------------------
 # Startup
