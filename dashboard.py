@@ -1,3 +1,4 @@
+import math
 import streamlit as st
 import sqlite3
 import pandas as pd
@@ -158,23 +159,62 @@ def load_data():
 # Keyword trends
 # --------------------------
 
-def trending_words(titles):
-    signal_terms = [
-        "ai","gpt","llm","startup","funding",
-        "hack","security","python","rust",
-        "openai","google","meta"
-    ]
+def extract_phrases(text):
+    words = re.findall(r"[a-zA-Z]{3,}", text.lower())
 
-    counts = Counter()
+    stop = {
+        "the","and","for","with","from","that","this","are","was",
+        "have","has","not","you","your","new","how","why","what"
+    }
 
-    for title in titles:
-        lower = title.lower()
-        for term in signal_terms:
-            if term in lower:
-                counts[term] += 1
+    words = [w for w in words if w not in stop]
 
-    return counts.most_common(10)
+    phrases = []
 
+    # bigrams
+    for i in range(len(words)-1):
+        phrases.append(words[i] + " " + words[i+1])
+
+    # trigrams
+    for i in range(len(words)-2):
+        phrases.append(words[i] + " " + words[i+1] + " " + words[i+2])
+
+    return phrases
+
+
+def detect_emerging_topics(df):
+    if len(df) < 20:
+        return []
+
+    df = df.sort_values("scraped_at", ascending=False)
+
+    recent = df.head(50)
+    older = df.iloc[50:250]
+
+    recent_counts = Counter()
+    older_counts = Counter()
+
+    for title in recent["title"]:
+        recent_counts.update(extract_phrases(title))
+
+    for title in older["title"]:
+        older_counts.update(extract_phrases(title))
+
+    scored = []
+
+    for phrase, recent_count in recent_counts.items():
+        old_count = older_counts.get(phrase, 0)
+
+        # velocity score
+        score = recent_count / (1 + old_count)
+
+        # require multiple recent mentions
+        if recent_count >= 2:
+            scored.append((phrase, round(score, 2), recent_count, old_count))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    return scored[:15]
 # --------------------------
 # Startup
 # --------------------------
